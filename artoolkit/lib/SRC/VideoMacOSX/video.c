@@ -7,7 +7,7 @@
  *
  */
 /*
- *	Copyright (c) 2003-2004 Philip Lamb (PRL) phil@eden.net.nz. All rights reserved.
+ *	Copyright (c) 2003-2005 Philip Lamb (PRL) phil@eden.net.nz. All rights reserved.
  *	
  *	Rev		Date		Who		Changes
  *	1.1.0	2003-09-09	PRL		Based on Apple "Son of MungGrab" sample code for QuickTime 6.
@@ -19,7 +19,11 @@
  *								so serialise access when there is more than one thread.
  *	1.2.1   2004-06-28  PRL		Support for 2vuy and yuvs pixel formats.
  *  1.3.0   2004-07-13  PRL		Code from Daniel Heckenberg to directly access vDig.
+ *  1.3.1   2004-12-07  PRL		Added config option "-pixelformat=" to support pixel format
+ *								specification at runtime, with default determined at compile time.
+ *	1.4.0	2005-03-08	PRL		Video input settings now saved and restored.
  *
+ *	TODO: Check version of Quicktime available at runtime.
  */
 /*
  * 
@@ -79,6 +83,7 @@
 #include <AR/config.h>
 #include <AR/ar.h>
 #include <AR/video.h>
+#include "videoInternal.h"
 
 // ============================================================================
 //	Private definitions
@@ -208,15 +213,13 @@ static SeqGrabComponent MakeSequenceGrabber(WindowRef pWindow, const int grabber
 	}
 	
    	// initialize the default sequence grabber component
-   	if(err = SGInitialize(seqGrab))
-	{
+   	if(err = SGInitialize(seqGrab)) {
 		fprintf(stderr, "SGInitialize err=%ld\n", err);
 		goto endFunc;
 	}
 	
 	// This should be defaulted to the current port according to QT doco
-	if (err = SGSetGWorld(seqGrab, GetWindowPort(pWindow), NULL))
-	{
+	if (err = SGSetGWorld(seqGrab, GetWindowPort(pWindow), NULL)) {
 		fprintf(stderr, "SGSetGWorld err=%ld\n", err);
 		goto endFunc;
 	}
@@ -236,8 +239,7 @@ static SeqGrabComponent MakeSequenceGrabber(WindowRef pWindow, const int grabber
 	}
 	
 endFunc:	
-		if (err && (seqGrab != NULL)) 
-		{ // clean up on failure
+		if (err && (seqGrab != NULL)) { // clean up on failure
 			CloseComponent(seqGrab);
 			seqGrab = NULL;
 		}
@@ -254,8 +256,7 @@ static ComponentResult MakeSequenceGrabChannel(SeqGrabComponent seqGrab, SGChann
     long  flags = 0;
     ComponentResult err = noErr;
     
-    if (err = SGNewChannel(seqGrab, VideoMediaType, psgchanVideo))
-	{
+    if (err = SGNewChannel(seqGrab, VideoMediaType, psgchanVideo)) {
 		fprintf(stderr, "SGNewChannel err=%ld\n", err);
 		goto endFunc;
 	}
@@ -263,8 +264,7 @@ static ComponentResult MakeSequenceGrabChannel(SeqGrabComponent seqGrab, SGChann
 	//	err = SGSetChannelBounds(*sgchanVideo, rect);
    	// set usage for new video channel to avoid playthrough
 	// note we don't set seqGrabPlayDuringRecord
-	if (err = SGSetChannelUsage(*psgchanVideo, flags | seqGrabRecord))
-	{
+	if (err = SGSetChannelUsage(*psgchanVideo, flags | seqGrabRecord)) {
 		fprintf(stderr, "SGSetChannelUsage err=%ld\n", err);
 		goto endFunc;
 	}
@@ -277,61 +277,6 @@ endFunc:
 		}
 	
 	return err;
-}
-
-// From QT sample code
-// Declaration of a typical application-defined function
-static Boolean MySGModalFilterProc (
-									DialogPtr            theDialog,
-									const EventRecord    *theEvent,
-									short                *itemHit,
-									long                 refCon )
-{
-	// Ordinarily, if we had multiple windows we cared about, we'd handle
-	// updating them in here, but since we don't, we'll just clear out
-	// any update events meant for us
-	Boolean	handled = false;
-	
-	if ((theEvent->what == updateEvt) && 
-		((WindowPtr) theEvent->message == (WindowPtr) refCon))
-	{
-		BeginUpdate ((WindowPtr) refCon);
-		EndUpdate ((WindowPtr) refCon);
-		handled = true;
-	}
-	return (handled);
-}
-
-static ComponentResult RequestSGSettings(  SeqGrabComponent		seqGrab, 
-					SGChannel				sgchanVideo )
-{
-	ComponentResult err;
-	
-    SGModalFilterUPP MySGModalFilterUPP;
-	if (!(MySGModalFilterUPP = NewSGModalFilterUPP (MySGModalFilterProc)))
-	{
-		fprintf(stderr, "NewSGModalFilterUPP error\n");
-		err = -1L; // TODO appropriate error code
-		goto endFunc;
-	}
-    
-	// let the user configure and choose the device and settings
-	// "Due to a bug in all versions QuickTime 6.x for the function call "SGSettingsDialog()" 
-	// when used with the "seqGrabSettingsPreviewOnly" parameter, all third party panels will 
-	// be excluded."  	from http://www.outcastsoft.com/ASCDFG1394.html  15/03/04
-	//if (err = SGSettingsDialog(seqGrab, sgchanVideo, 0, NULL, seqGrabSettingsPreviewOnly, MySGModalFilterUPP, 0))
-	if (err = SGSettingsDialog(seqGrab, sgchanVideo, 0, NULL, 0, MySGModalFilterUPP, 0))
-	{
-		fprintf(stderr, "SGSettingsDialog err=%ld\n", err);
-		goto endFunc;
-	}
-    
-	// Dispose of the UPP
-	if (MySGModalFilterUPP)
-		DisposeSGModalFilterUPP(MySGModalFilterUPP);
-    
-endFunc:
-		return err;
 }
 
 static ComponentResult vdgGetSettings(VdigGrab* pVdg)
@@ -393,19 +338,16 @@ VdigGrabRef vdgAllocAndInit(const int grabber)
 	return (pVdg);
 }
 
-static ComponentResult vdgRequestSettings(VdigGrab* pVdg, int showDialog)
+static ComponentResult vdgRequestSettings(VdigGrab* pVdg, const int showDialog, const int inputIndex)
 {
 	ComponentResult err;
 	
 	// Use the SG Dialog to allow the user to select device and compression settings
-	if (showDialog) {
-		if (err = RequestSGSettings(  pVdg->seqGrab,
-									  pVdg->sgchanVideo)) {
-			fprintf(stderr, "RequestSGSettings err=%ld\n", err); 
-			goto endFunc;
-		}
-	}
-	
+	if (err = RequestSGSettings(inputIndex, pVdg->seqGrab, pVdg->sgchanVideo, showDialog)) {
+		fprintf(stderr, "RequestSGSettings err=%ld\n", err); 
+		goto endFunc;
+	}	
+
 	if (err = vdgGetSettings(pVdg)) {
 		fprintf(stderr, "vdgGetSettings err=%ld\n", err); 
 		goto endFunc;
@@ -418,11 +360,10 @@ endFunc:
 static VideoDigitizerError vdgGetDeviceNameAndFlags(VdigGrab* pVdg, char* szName, long* pBuffSize, UInt32* pVdFlags)
 {
 	VideoDigitizerError err;
-	Str255	vdName;
+	Str255	vdName; // Pascal string (first byte is string length.
     UInt32	vdFlags;
 	
-	if (!pBuffSize)
-	{
+	if (!pBuffSize) {
 		fprintf(stderr, "vdgGetDeviceName: NULL pointer error\n");
 		err = (VideoDigitizerError)qtParamErr; 
 		goto endFunc;
@@ -430,23 +371,20 @@ static VideoDigitizerError vdgGetDeviceNameAndFlags(VdigGrab* pVdg, char* szName
 	
 	if (err = VDGetDeviceNameAndFlags(  pVdg->vdCompInst,
 										vdName,
-										&vdFlags))
-	{
+										&vdFlags)) {
 		fprintf(stderr, "VDGetDeviceNameAndFlags err=%ld\n", err);
 		*pBuffSize = 0; 
 		goto endFunc;
 	}
 	
-	if (szName)
-	{
+	if (szName) {
 		int copyLen = (*pBuffSize-1 < vdName[0] ? *pBuffSize-1 : vdName[0]);
 		
 		strncpy(szName, vdName+1, copyLen);
 		szName[copyLen] = '\0';
 		
 		*pBuffSize = copyLen + 1;
-	} else
-	{
+	} else {
 		*pBuffSize = vdName[0] + 1;
 	} 
 	
@@ -1056,8 +994,8 @@ static void *ar2VideoInternalThread(void *arg)
 #endif // AR_VIDEO_HAVE_THREADSAFE_QUICKTIME
 	AR2VideoParamT		*vid;
 	int					keepAlive = 1;
-	struct				timeval tv;  // Seconds and microseconds since Jan 1, 1970.
-	struct				timespec ts;  // Seconds and nanoseconds since Jan 1, 1970.
+	struct timeval		tv;  // Seconds and microseconds since Jan 1, 1970.
+	struct timespec		ts;  // Seconds and nanoseconds since Jan 1, 1970.
 	ComponentResult		err;
 	int					err_i;
 	int					isUpdated = 0;
@@ -1096,9 +1034,12 @@ static void *ar2VideoInternalThread(void *arg)
 	while (keepAlive && vdgIsGrabbing(vid->pVdg)) {
 		
 		gettimeofday(&tv, NULL);
-		ts.tv_sec = tv.tv_sec; // TODO: Also add overflow from value below.
+		ts.tv_sec = tv.tv_sec;
 		ts.tv_nsec = tv.tv_usec * 1000 + vid->milliSecPerTimer * 1E6;
-		
+		if (ts.tv_nsec >= 1E9) {
+			ts.tv_nsec -= 1E9;
+			ts.tv_sec += 1;
+		}
 #ifndef AR_VIDEO_HAVE_THREADSAFE_QUICKTIME
 		// Get a lock to access QuickTime (for SGIdle()), but only if more than one thread is running.
 		if (gVidCount > 1) {
@@ -1195,18 +1136,30 @@ static void *ar2VideoInternalThread(void *arg)
 
 int ar2VideoDispOption(void)
 {
+	//     0         1         2         3         4         5         6         7
+	//     0123456789012345678901234567890123456789012345678901234567890123456789012
     printf("ARVideo may be configured using one or more of the following options,\n");
     printf("separated by a space:\n\n");
     printf(" -nodialog\n");
-    printf("    don't display video settings dialog.\n");
+    printf("    Don't display video settings dialog.\n");
     printf(" -width=w\n");
-    printf("    scale camera native image to width w.\n");
+    printf("    Scale camera native image to width w.\n");
     printf(" -height=h\n");
-    printf("    scale camera native image to height w.\n");
+    printf("    Scale camera native image to height h.\n");
     printf(" -fps\n");
-    printf("    overlay camera frame counter on image.\n");
+    printf("    Overlay camera frame counter on image.\n");
     printf(" -grabber=n\n");
-    printf("    with multiple video grabbers available, use grabber n, default 1.\n");
+    printf("    With multiple QuickTime video grabber components installed,\n");
+	printf("    use component n (default n=1).\n");
+	printf("    N.B. It is NOT necessary to use this option if you have installed\n");
+	printf("    more than one video input device (e.g. two cameras) as the default\n");
+	printf("    QuickTime grabber can manage multiple video channels.\n");
+	printf(" -pixelformat=cccc\n");
+    printf("    Return images with pixels in format cccc, where cccc is either a\n");
+    printf("    numeric pixel format number or a valid 4-character-code for a\n");
+    printf("    pixel format. The following values are supported: \n");
+    printf("    32, BGRA, RGBA, ABGR, 24, 24BG, 2vuy, yuvs.\n");
+    printf("    (See definitions in <QuickDraw.h> and QuickTime API reference IV-2862.)\n");
     printf("\n");
 
     return (0);
@@ -1229,7 +1182,8 @@ AR2VideoParamT *ar2VideoOpen(char *config)
 #ifndef AR_VIDEO_HAVE_THREADSAFE_QUICKTIME
 	int					weLocked = 0;
 #endif // !AR_VIDEO_HAVE_THREADSAFE_QUICKTIME
-	OSType				pixFormat;
+	OSType				pixFormat = (OSType)0;
+	long				bytesPerPixel;
 	CGrafPtr			theSavedPort;
 	GDHandle			theSavedDevice;
 	Rect				sourceRect = {0, 0};
@@ -1255,9 +1209,18 @@ AR2VideoParamT *ar2VideoOpen(char *config)
                 }
             } else if (strncmp(a, "-grabber=", 9) == 0) {
                 sscanf(a, "%s", line);
-                if (sscanf(&line[8], "%d", &grabber) == 0) {
+                if (sscanf(&line[9], "%d", &grabber) == 0) {
                     ar2VideoDispOption();
                     return (NULL);
+                }
+            } else if (strncmp(a, "-pixelformat=", 13) == 0) {
+                sscanf(a, "%s", line);
+                if (sscanf(&line[13], "%c%c%c%c", (char *)&pixFormat, ((char *)&pixFormat) + 1,
+						   ((char *)&pixFormat) + 2, ((char *)&pixFormat) + 3) < 4) { // Try 4-cc first.
+					if (sscanf(&line[13], "%li", (long *)&pixFormat) < 1) { // Fall back to integer.
+						ar2VideoDispOption();
+						return (NULL);
+					}
                 }
             } else if (strncmp(a, "-fps", 4) == 0) {
                 showFPS = 1;
@@ -1269,9 +1232,53 @@ AR2VideoParamT *ar2VideoOpen(char *config)
             }
 
             while (*a != ' ' && *a != '\t' && *a != '\0') a++; // Skip non-whitespace.
-        }           
-    }           
-
+        }
+    }
+	// If no pixel format was specified in command-line options,
+	// assign the one specified at compile-time as the default.
+	if (!pixFormat) {
+#if defined(AR_PIX_FORMAT_2vuy)
+		pixFormat = k2vuyPixelFormat;		// k422YpCbCr8CodecType, k422YpCbCr8PixelFormat
+#elif defined(AR_PIX_FORMAT_yuvs)
+		pixFormat = kYUVSPixelFormat;		// kComponentVideoUnsigned
+#elif defined(AR_PIX_FORMAT_RGB)
+		pixFormat = k24RGBPixelFormat;
+#elif defined(AR_PIX_FORMAT_BGR)
+		pixFormat = k24BGRPixelFormat;
+#elif defined(AR_PIX_FORMAT_ARGB)
+		pixFormat = k32ARGBPixelFormat;
+#elif defined(AR_PIX_FORMAT_RGBA)
+		pixFormat = k32RGBAPixelFormat;
+#elif defined(AR_PIX_FORMAT_ABGR)
+		pixFormat = k32ABGRPixelFormat;
+#elif defined(AR_PIX_FORMAT_BGRA)
+		pixFormat = k32BGRAPixelFormat;
+#else
+#  error Unsupported default pixel format specified in config.h.
+#endif
+	}
+	
+	switch (pixFormat) {
+		case k2vuyPixelFormat:
+		case kYUVSPixelFormat:
+			bytesPerPixel = 2l;
+			break; 
+		case k24RGBPixelFormat:
+		case k24BGRPixelFormat:
+			bytesPerPixel = 3l;
+			break;
+		case k32ARGBPixelFormat:
+		case k32BGRAPixelFormat:
+		case k32ABGRPixelFormat:
+		case k32RGBAPixelFormat:
+			bytesPerPixel = 4l;
+			break;
+		default:
+			fprintf(stderr, "ar2VideoOpen(): Unsupported pixel format requested.\n");
+			return(NULL);
+			break;			
+	}
+	
 	// Once only, initialize for Carbon.
     if(initF == 0) {
         InitCursor();
@@ -1317,15 +1324,15 @@ AR2VideoParamT *ar2VideoOpen(char *config)
 	vid->showFPS		= showFPS;
 	vid->frameCount		= 0;
 	//vid->lastTime		= 0;
-	//vid->timeScale		= 0;
-	vid->grabber			= grabber;
+	//vid->timeScale	= 0;
+	vid->grabber		= grabber;
 
 	if(!(vid->pVdg = vdgAllocAndInit(grabber))) {
 		fprintf(stderr, "vdgAllocAndInit err=%ld\n", err);
 		goto out1;
 	}
 	
-	if (err = vdgRequestSettings(vid->pVdg, showDialog)) {
+	if (err = vdgRequestSettings(vid->pVdg, showDialog, gVidCount)) {
 		fprintf(stderr, "vdgRequestSettings err=%ld\n", err);
 		goto out2;
 	}
@@ -1378,8 +1385,8 @@ AR2VideoParamT *ar2VideoOpen(char *config)
 			(char)(((*(vid->vdImageDesc))->cType >>  0) & 0xFF),
 			((*vid->vdImageDesc)->width), ((*vid->vdImageDesc)->height));
 			
-	// If a particular size was requested, set our window size based on the request,
-	// otherwise set our window size based on the video size.
+	// If a particular size was requested, set the size of the GWorld to
+	// the request, otherwise set it to the size of the incoming video.
 	vid->width = (width ? width : (int)((*vid->vdImageDesc)->width));
 	vid->height = (height ? height : (int)((*vid->vdImageDesc)->height));
 	SetRect(&(vid->theRect), 0, 0, (short)vid->width, (short)vid->height);
@@ -1397,24 +1404,15 @@ AR2VideoParamT *ar2VideoOpen(char *config)
 	
 	// Allocate buffer for the grabber to write pixel data into, and use
 	// QTNewGWorldFromPtr() to wrap an offscreen GWorld structure around
-	// it. We do this rather than using QTNewGWorld() to do the equivalent
+	// it. We do it in these two steps rather than using QTNewGWorld()
 	// to guarantee that we don't get padding bytes at the end of rows.
-#if defined(AR_PIX_FORMAT_ARGB)
-	pixFormat = k32ARGBPixelFormat;
-#elif defined(AR_PIX_FORMAT_2vuy)
-	pixFormat = k2vuyPixelFormat;		// k422YpCbCr8CodecType, k422YpCbCr8PixelFormat
-#elif defined(AR_PIX_FORMAT_yuvs)
-	pixFormat = kYUVSPixelFormat;		// kComponentVideoUnsigned
-#else
-#  error Unsupported pixel format specified in config.h.
-#endif
-	vid->rowBytes = vid->width * AR_PIX_SIZE;
+	vid->rowBytes = vid->width * bytesPerPixel;
 	vid->bufSize = vid->height * vid->rowBytes;
-	arMalloc(vid->bufPixels, ARUint8, vid->bufSize);
+	if (!(vid->bufPixels = (ARUint8 *)valloc(vid->bufSize * sizeof(ARUint8)))) exit (1);
 #ifdef AR_VIDEO_DEBUG_BUFFERCOPY
 	// And another two buffers for OpenGL to read out of.
-	arMalloc(vid->bufPixelsCopy1, ARUint8, vid->bufSize);
-	arMalloc(vid->bufPixelsCopy2, ARUint8, vid->bufSize);
+	if (!(vid->bufPixelsCopy1 = (ARUint8 *)valloc(vid->bufSize * sizeof(ARUint8)))) exit (1);
+	if (!(vid->bufPixelsCopy2 = (ARUint8 *)valloc(vid->bufSize * sizeof(ARUint8)))) exit (1);
 #endif // AR_VIDEO_DEBUG_BUFFERCOPY
 	   // Wrap a GWorld around the pixel buffer.
 	err_s = QTNewGWorldFromPtr(&(vid->pGWorld),			// returned GWorld
